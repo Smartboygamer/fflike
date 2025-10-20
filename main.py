@@ -1,8 +1,7 @@
-# like_api.py
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
 from typing import Optional, List
-from datetime import datetime, date
+from datetime import datetime
 import sqlite3
 import threading
 
@@ -35,6 +34,85 @@ def init_db():
                     completed_at TEXT
                 )""")
     conn.commit()
+    return conn
+
+DB = init_db()
+DB_LOCK = threading.Lock()
+
+def db_execute(query, params=(), fetch=False):
+    with DB_LOCK:
+        cur = DB.cursor()
+        cur.execute(query, params)
+        if fetch:
+            return cur.fetchall()
+        DB.commit()
+        return None
+
+# ---------- Schemas ----------
+class RegisterIn(BaseModel):
+    telegram_id: int
+    username: Optional[str] = None
+
+class CreateRequestIn(BaseModel):
+    telegram_id: int
+    uid: str = Field(..., json_schema_extra={"example": "2476897412"})
+    region: str = Field(..., json_schema_extra={"example": "IND"})
+    proof_url: HttpUrl
+    points: int = Field(..., ge=1, le=100)
+
+class ClaimIn(BaseModel):
+    telegram_id: int
+    request_id: int
+
+class ConfirmIn(BaseModel):
+    telegram_id: int
+    request_id: int
+    claim_proof_url: HttpUrl
+
+class ReqOut(BaseModel):
+    id: int
+    owner_id: int
+    uid: str
+    region: str
+    proof_url: HttpUrl
+    points_requested: int
+    status: str
+    claimed_by: Optional[int]
+    created_at: str
+
+# ---------- Endpoints ----------
+@app.post("/register")
+def register(payload: RegisterIn):
+    user = db_execute("SELECT id FROM users WHERE telegram_id = ?", (payload.telegram_id,), fetch=True)
+    if user:
+        return {"ok": True, "message": "Already registered"}
+    db_execute(
+        "INSERT INTO users (telegram_id, username, created_at) VALUES (?, ?, ?)",
+        (payload.telegram_id, payload.username or "", datetime.utcnow().isoformat())
+    )
+    return {"ok": True, "message": "Registered"}
+
+@app.get("/me/{telegram_id}")
+def me(telegram_id: int):
+    row = db_execute("SELECT id, telegram_id, username, points, is_vip, created_at FROM users WHERE telegram_id = ?", (telegram_id,), fetch=True)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    id_, tg, username, points, is_vip, created_at = row[0]
+    return {"id": id_, "telegram_id": tg, "username": username, "points": points, "is_vip": bool(is_vip), "created_at": created_at}
+
+@app.get("/requests/open", response_model=List[ReqOut])
+def list_open_requests():
+    rows = db_execute("SELECT id, owner_id, uid, region, proof_url, points_requested, status, created_at, claimed_by FROM requests WHERE status = 'open' ORDER BY created_at DESC", fetch=True)
+    return [
+        {
+            "id": r[0], "owner_id": r[1], "uid": r[2],
+            "region": r[3], "proof_url": r[4],
+            "points_requested": r[5], "status": r[6],
+            "claimed_by": r[8], "created_at": r[7]
+        } for r in rows
+    ]
+
+# ---------- Add remaining endpoints (create_request, claim, confirm, admin_add_points, get_points) similarly ----------    conn.commit()
     return conn
 
 DB = init_db()
